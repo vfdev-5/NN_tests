@@ -8,6 +8,7 @@ results/*
 *.caffemodel
 *.solverstate
 *.h5
+.floyd*
 
 common/otb_conf.yaml
 
