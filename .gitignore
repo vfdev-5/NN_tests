@@ -9,8 +9,7 @@ results/*
 *.solverstate
 *.h5
 .floyd*
-
-common/otb_conf.yaml
+logs/
 
 ## Linux backup files
 *~
