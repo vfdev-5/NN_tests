@@ -9,7 +9,7 @@ results/*
 *.solverstate
 *.h5
 .floyd*
-logs/
+logs*/
 
 ## Linux backup files
 *~
