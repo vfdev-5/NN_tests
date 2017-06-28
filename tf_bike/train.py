@@ -106,7 +106,7 @@ class Trainer:
                                               '%s_seed=%i_loss={loss}_val_loss={val_loss}' % (model_name, seed))
 
         sv = tf.train.Supervisor(logdir=train_path,
-                                 summary_op=merged_summary_op,
+                                 summary_op=None,
                                  checkpoint_basename=model_name + '.ckpt')
         # saver = sv.saver
 
@@ -124,18 +124,17 @@ class Trainer:
             train_x, val_x, train_y, val_y = train_test_split(trainval_x, trainval_y, train_size=train_size)
 
             training_epochs = training_params['training_epochs']
-            train_ops = [optimizer, loss, merged_summary_op]
+            train_ops = [optimizer, loss]
             train_ops.extend(metrics)
-            val_ops = [loss, merged_summary_op]
+            val_ops = [loss, ]
             val_ops.extend(metrics)
 
-            def run_epoch(ops, _x, _y, _writer, is_training_phase):
+            def run_epoch(ops, summary_op, _x, _y, _writer, is_training_phase):
                 avg_loss = 0.0
                 avg_metrics = np.zeros((len(metrics),))
                 n_batchs = int(_x.shape[0] / batch_size)
 
                 prefix = 'val_' if not is_training_phase else ''
-                ops_loss_index = 0 if not is_training_phase else 1
 
                 # Train over all batches
                 for i in range(n_batchs):
@@ -145,13 +144,21 @@ class Trainer:
                     batch_x, batch_y = Trainer.get_batch(i, batch_size, _x, _y)
                     # Run optimization op (backprop), loss op (to get loss value)
                     # and summary nodes
-                    ret = sess.run(ops, feed_dict={X: batch_x, Y_true: batch_y})
-                    loss_value = ret[ops_loss_index]
-                    summary = ret[ops_loss_index+1]
-                    metrics_values = ret[ops_loss_index+2:]
+                    if i % 100 == 0:
+                        _ops = [summary_op, ]
+                        _ops.extend(ops)
+                        ret = sess.run(_ops, feed_dict={X: batch_x, Y_true: batch_y})
+                        summary = ret[0]
+                        sv.summary_computed(sess, summary)
+                        ops_loss_index = 2 if ret[1] is None else 1
+                        # Write logs at every iteration
+                        _writer.add_summary(summary, epoch * n_batchs + i)
+                    else:
+                        ret = sess.run(ops, feed_dict={X: batch_x, Y_true: batch_y})
+                        ops_loss_index = 1 if ret[0] is None else 0
 
-                    # Write logs at every iteration
-                    _writer.add_summary(summary, epoch * n_batchs + i)
+                    loss_value = ret[ops_loss_index]
+                    metrics_values = ret[ops_loss_index+1:]
 
                     # Compute average loss
                     avg_loss += loss_value * 1.0 / n_batchs
@@ -184,9 +191,11 @@ class Trainer:
                     print("Epoch: %04d" % (epoch + 1))
 
                 train_avg_loss, train_avg_metrics = run_epoch(train_ops,
+                                                              merged_summary_op,
                                                               train_x, train_y,
                                                               train_writer, is_training_phase=True)
                 val_avg_loss, val_avg_metrics = run_epoch(val_ops,
+                                                          merged_summary_op,
                                                           val_x, val_y,
                                                           val_writer, is_training_phase=False)
                 # if best_avg_val_loss is None or best_avg_val_loss > val_avg_loss:
