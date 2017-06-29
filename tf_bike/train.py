@@ -1,4 +1,6 @@
 import os
+from glob import glob
+
 import numpy as np
 from sklearn.model_selection import train_test_split
 import tensorflow as tf
@@ -11,10 +13,24 @@ class Trainer:
         self.display_step = 100
 
     @staticmethod
-    def get_batch(batch_index, batch_size, train_x, train_y):
+    def get_batch(batch_index, batch_size, train_x, train_y=None):
         start = batch_size * batch_index
         end = batch_size * (batch_index + 1)
-        return train_x[start:end, ...], train_y[start:end, ...]
+        if train_y:
+            return train_x[start:end, ...], train_y[start:end, ...], (start, end)
+        return train_x[start:end, ...], (start, end)
+
+    @staticmethod
+    def _check_params(training_params):
+        assert isinstance(training_params, dict), "training_params should be a dict"
+        assert 'network' in training_params and callable(training_params['network']), \
+            "training_params should contain network function"
+        assert 'loss' in training_params and callable(training_params['loss']), \
+            "training_params should contain loss function"
+        assert 'optimizer' in training_params, \
+            "training_params should contain optimizer function"
+        assert 'training_epochs' in training_params, \
+            "training_params should contain training_epochs key"
 
     def train(self, trainval_x, trainval_y, training_params, verbose=0):
         """
@@ -28,16 +44,7 @@ class Trainer:
         """
         assert isinstance(trainval_x, np.ndarray), "trainval_x should be an ndarray"
         assert isinstance(trainval_y, np.ndarray), "trainval_y should be an ndarray"
-        assert isinstance(training_params, dict), "training_params should be a dict"
-
-        assert 'network' in training_params and callable(training_params['network']), \
-            "training_params should contain network function"
-        assert 'loss' in training_params and callable(training_params['loss']), \
-            "training_params should contain loss function"
-        assert 'optimizer' in training_params, \
-            "training_params should contain optimizer function"
-        assert 'training_epochs' in training_params, \
-            "training_params should contain training_epochs key"
+        Trainer._check_params(training_params)
 
         network_f = training_params['network']
         loss_f = training_params['loss']
@@ -103,12 +110,31 @@ class Trainer:
 
         model_name = Y_pred.name[:-2]
         saver_model_path_templ = os.path.join(self._log_dir,
-                                              '%s_seed=%i_loss={loss}_val_loss={val_loss}' % (model_name, seed))
+                                              '%s_seed=%i_loss={loss:5f}_val_loss={val_loss:5f}'
+                                              % (model_name, seed))
 
+        # If there is a pretrained model
+        if 'pretrained_model' not in training_params:
+            # find the best checkpoint
+            pretrained_model_path = find_best_checkpoint(os.path.join(self._log_dir, "Model"))
+            if verbose > 0 and pretrained_model_path is not None:
+                print("Load found pretrained model: %s" % pretrained_model_path)
+        else:
+            pretrained_model_path = training_params['pretrained_model']
+
+        def load_pretrained(sess):
+            saver.restore(sess, pretrained_model_path)
+
+        init_fn = None if pretrained_model_path is None else load_pretrained
+
+        vars_to_store = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Model')
+        vars_to_store.append(global_step)
+        saver = tf.train.Saver(vars_to_store, max_to_keep=20)
         sv = tf.train.Supervisor(logdir=train_path,
                                  summary_op=None,
+                                 saver=saver,
+                                 init_fn=init_fn,
                                  checkpoint_basename=model_name + '.ckpt')
-        # saver = sv.saver
 
         with sv.managed_session() as sess:
 
@@ -141,7 +167,7 @@ class Trainer:
                     if verbose > 1:
                         print("-- %i / %i" % (i, n_batchs))
 
-                    batch_x, batch_y = Trainer.get_batch(i, batch_size, _x, _y)
+                    batch_x, batch_y, _ = Trainer.get_batch(i, batch_size, _x, _y)
                     # Run optimization op (backprop), loss op (to get loss value)
                     # and summary nodes
                     if i % 100 == 0:
@@ -174,8 +200,11 @@ class Trainer:
 
                 return avg_loss, avg_metrics
 
-            # def save_model(_train_loss, _val_loss):
-            #     saver.save(sess, save_path=saver_model_path_templ.format(loss=_train_loss, val_loss=_val_loss))
+            def save_model(global_step, _train_loss, _val_loss):
+                saver.save(sess,
+                           global_step=global_step,
+                           save_path=saver_model_path_templ.format(loss=_train_loss,
+                                                                   val_loss=_val_loss))
 
             # Training cycle
             best_avg_val_loss = None
@@ -198,14 +227,107 @@ class Trainer:
                                                           merged_summary_op,
                                                           val_x, val_y,
                                                           val_writer, is_training_phase=False)
-                # if best_avg_val_loss is None or best_avg_val_loss > val_avg_loss:
-                #     best_avg_val_loss = val_avg_loss
-                #     save_model(train_avg_loss, val_avg_loss)
+
+                if best_avg_val_loss is None or best_avg_val_loss > val_avg_loss + 0.005:
+                    best_avg_val_loss = val_avg_loss
+                    save_model(global_step, train_avg_loss, val_avg_loss)
 
             if verbose > 0:
                 print("Optimization Finished!")
 
             # Save the last model
-            # save_model(train_avg_loss, val_avg_loss)
+            save_model(training_epochs, train_avg_loss, val_avg_loss)
+
+    def predict(self, test_x, training_params, verbose=0):
+        """
+
+        :param test_x:
+        :param training_params:
+        :param verbose:
+        :return:
+        """
+        assert isinstance(test_x, np.ndarray), "trainval_x should be an ndarray"
+        Trainer._check_params(training_params)
+        assert 'pretrained_model' in training_params, \
+            "training_params should contain a path to a pretrained model"
+
+        network_f = training_params['network']
+        batch_size = training_params['batch_size'] if 'batch_size' in training_params else 16
+        n_features = np.prod(test_x.shape[1:])
+
+        tf.reset_default_graph()
+        X = tf.placeholder(tf.float32, shape=(batch_size, n_features), name="X")
+        Y_pred = network_f(X)
+
+        if verbose > 0:
+            print("Start predictions")
+
+        seed = np.random.randint(0, 10000) if 'seed' not in training_params else training_params['seed']
+        tf.set_random_seed(seed)
+
+        # If there is a pretrained model
+        pretrained_model_path = training_params['pretrained_model']
+        saver = tf.train.Saver()
+
+        tf.reset_default_graph()
+        with tf.Session() as sess:
+            saver.restore(sess, pretrained_model_path)
+            n_samples = test_x.shape[0]
+            y_pred = np.zeros((n_samples, 1))
+            n_batchs = int(n_samples / batch_size)
+
+            # Predict over all batches
+            for i in range(n_batchs):
+                if verbose > 1:
+                    print("-- %i / %i" % (i, n_batchs))
+
+                batch_x, (start, end) = Trainer.get_batch(i, batch_size, test_x)
+
+                ret = sess.run(Y_pred, feed_dict={X: batch_x})
+                y_pred[i]
+
+                loss_value = ret[ops_loss_index]
+                metrics_values = ret[ops_loss_index + 1:]
+
+                # Compute average loss
+                avg_loss += loss_value * 1.0 / n_batchs
+                for j, v in enumerate(metrics_values):
+                    avg_metrics[j] += v * 1.0 / n_batchs
+
+                    # Display logs per epoch step
+            if verbose > 0 and (epoch + 1) % self.display_step == 0:
+                print(prefix + "loss=%.9f | " % avg_loss, end='')
+                for (name, _), avg_value in zip(metrics_list, avg_metrics):
+                    print(prefix + "%s=%.9f" % (name, avg_value), end=' ')
+                print('')
+
+            return avg_loss, avg_metrics
 
 
+
+def find_best_checkpoint(checkpoint_dir, field_name='val_loss', best_min=True):
+
+    if best_min:
+        best_value = 1e50
+        comp = lambda a, b: a > b
+    else:
+        best_value = -1e50
+        comp = lambda a, b: a < b
+
+    if '=' != field_name[-1]:
+        field_name += '='
+
+    best_ckpt_filename = None
+    ckpt_files = glob(os.path.join(checkpoint_dir, '*.index'))
+    for f in ckpt_files:
+        index = f.find(field_name)
+        index += len(field_name)
+        assert index >= 0, "Field name '%s' is not found in '%s'" % (field_name, f)
+        end = f.find('_', index)
+        if end < 0:
+            end = f.find('-', index)
+        val = float(f[index:end])
+        if comp(best_value, val):
+            best_value = val
+            best_ckpt_filename = f[:-6]  # skip .index at the end
+    return best_ckpt_filename
