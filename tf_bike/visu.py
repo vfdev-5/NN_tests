@@ -1,6 +1,6 @@
 # From http://nbviewer.jupyter.org/github/tensorflow/tensorflow/blob/master/tensorflow/examples/tutorials/deepdream/deepdream.ipynb
 # Helper functions for TF Graph visualization
-
+import numpy as np
 import tensorflow as tf
 from IPython.display import clear_output, Image, display, HTML
 

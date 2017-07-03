@@ -128,8 +128,8 @@ class Trainer:
         vars_to_store = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope='Model')
         if verbose > 0:
             n_params = np.sum([np.product([xi.value for xi in x.get_shape()]) for x in vars_to_store])
-            print("Model contains %i of trainable variables" % len(vars_to_store), end=' ')
-            print("and %i of trainable parameters" % int(n_params))
+            print("Model contains %i trainable variables" % len(vars_to_store), end=' ')
+            print("and %i trainable parameters" % int(n_params))
         vars_to_store.append(global_step)
         saver = tf.train.Saver(vars_to_store, max_to_keep=20)
         sv = tf.train.Supervisor(logdir=train_path,
@@ -209,7 +209,7 @@ class Trainer:
                 if verbose > 0 and (epoch + 1) % self.display_step == 0:
                     print(prefix + "loss=%.9f | " % avg_loss, end='')
                     for (name, _), avg_value in zip(metrics_list, avg_metrics):
-                        print(prefix + "%s=%.9f" % (name, avg_value), end=' ')
+                        print(prefix + "%s=%.9f" % (name, avg_value), end=', ')
                     print('')
 
                 return avg_loss, avg_metrics
